@@ -4,7 +4,13 @@ import random
 import re
 
 from dotenv import load_dotenv
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -29,8 +35,10 @@ from database import (
     get_word_by_id,
     import_words_from_csv_files,
     init_db,
+    is_teacher,
     join_class,
     save_user_level,
+    save_user_profile,
     set_reminder,
     update_daily_activity,
     update_quiz_progress,
@@ -38,7 +46,12 @@ from database import (
 
 
 LEVELS = ("A1", "A2", "B1", "B2")
-CREATE_CLASS_SCHOOL, CREATE_CLASS_NAME = range(2)
+(
+    CREATE_CLASS_SCHOOL,
+    CREATE_CLASS_NAME,
+    CREATE_CLASS_TEACHER,
+    CREATE_CLASS_WELCOME,
+) = range(4)
 WORD_EMOJIS = {
     "apple": "🍎",
     "book": "📖",
@@ -66,18 +79,25 @@ WORD_EMOJIS = {
 DEFAULT_WORD_EMOJIS = ["✨", "🌟", "💬", "🧠", "📌", "🚀"]
 BOT_COMMANDS = [
     BotCommand("start", "Start the bot"),
-    BotCommand("daily", "Today's vocabulary"),
-    BotCommand("quiz", "Take a quiz"),
-    BotCommand("progress", "View progress"),
-    BotCommand("level", "Change level"),
-    BotCommand("reminder_on", "Turn on daily reminder"),
-    BotCommand("reminder_off", "Turn off daily reminder"),
-    BotCommand("create_class", "Create a class code"),
-    BotCommand("join", "Join a class"),
-    BotCommand("my_class", "View your class"),
-    BotCommand("class_students", "View class students"),
     BotCommand("help", "How to use the bot"),
 ]
+
+DAILY_BUTTON = "📚 Daily"
+QUIZ_BUTTON = "🧠 Quiz"
+PROGRESS_BUTTON = "📊 Progress"
+SETTINGS_BUTTON = "⚙️ Settings"
+MY_CLASS_BUTTON = "🏫 My Class"
+CHANGE_LEVEL_BUTTON = "🎚 Change Level"
+REMINDER_BUTTON = "⏰ Reminder"
+REMINDER_ON_BUTTON = "🔔 Reminder On"
+REMINDER_OFF_BUTTON = "🔕 Reminder Off"
+BACK_BUTTON = "⬅️ Back"
+STUDENTS_BUTTON = "👥 Students"
+MY_CLASSES_BUTTON = "🏫 My Classes"
+CREATE_CLASS_BUTTON = "➕ Create Class"
+TEACHER_TOOLS_BUTTON = "⚙️ Teacher Tools"
+CLASS_REPORT_BUTTON = "📊 Class Report"
+SEND_REMINDER_BUTTON = "📢 Send Reminder"
 
 
 logging.basicConfig(
@@ -93,6 +113,75 @@ def level_keyboard() -> InlineKeyboardMarkup:
         for level in LEVELS
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def student_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [DAILY_BUTTON, QUIZ_BUTTON, PROGRESS_BUTTON],
+            [SETTINGS_BUTTON, MY_CLASS_BUTTON],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def student_settings_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [CHANGE_LEVEL_BUTTON, REMINDER_BUTTON],
+            [BACK_BUTTON],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def reminder_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [REMINDER_ON_BUTTON, REMINDER_OFF_BUTTON],
+            [BACK_BUTTON],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def teacher_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [DAILY_BUTTON, QUIZ_BUTTON, STUDENTS_BUTTON],
+            [MY_CLASSES_BUTTON, CREATE_CLASS_BUTTON],
+            [TEACHER_TOOLS_BUTTON],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def teacher_tools_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [CLASS_REPORT_BUTTON, SEND_REMINDER_BUTTON],
+            [BACK_BUTTON],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def user_menu_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
+    if is_teacher(telegram_id):
+        return teacher_menu_keyboard()
+
+    return student_menu_keyboard()
+
+
+async def require_teacher(update: Update) -> bool:
+    if is_teacher(update.effective_user.id):
+        return True
+
+    await update.message.reply_text(
+        "❌ Teacher access required.",
+        reply_markup=student_menu_keyboard(),
+    )
+    return False
 
 
 def escape_markdown(text: str) -> str:
@@ -134,12 +223,31 @@ def generate_class_code(school_name: str, class_name: str) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    save_user_profile(user.id, first_name=user.first_name, username=user.username)
+    class_info = get_user_class(user.id)
+
+    if class_info:
+        teacher_name = class_info.get("teacher_name") or "Your teacher"
+        welcome_message = (
+            class_info.get("welcome_message")
+            or "Today's English practice is ready."
+        )
+        await update.message.reply_text(
+            f"🏫 Welcome to {class_info['school_name']}\n\n"
+            f"Teacher: {teacher_name}\n"
+            f"Class: {class_info['class_name']}\n\n"
+            f"{welcome_message}",
+            reply_markup=user_menu_keyboard(user.id),
+        )
+        return
+
     await update.message.reply_text(
-        "Welcome to ESL Vocabulary Trainer!\n\n"
-        "Choose your English level:\n\n"
+        "✨ Welcome to ESL Vocabulary Trainer!\n\n"
+        "Use the keyboard below to practice every day.\n\n"
         "If you have a class code from your teacher, send:\n"
         "/join YOUR-CODE",
-        reply_markup=level_keyboard(),
+        reply_markup=user_menu_keyboard(update.effective_user.id),
     )
 
 
@@ -154,6 +262,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🔔 Reminder - Turn daily reminders on/off\n"
         "🏫 Classes - Create or join a class with Telegram",
         parse_mode="Markdown",
+        reply_markup=user_menu_keyboard(update.effective_user.id),
     )
 
 
@@ -161,6 +270,9 @@ async def create_class_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    if not await require_teacher(update):
+        return ConversationHandler.END
+
     await update.message.reply_text("Enter school name")
     return CREATE_CLASS_SCHOOL
 
@@ -178,25 +290,51 @@ async def create_class_name(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    context.user_data["class_name"] = update.message.text.strip()
+    await update.message.reply_text("Enter teacher name")
+    return CREATE_CLASS_TEACHER
+
+
+async def create_class_teacher(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    context.user_data["teacher_name"] = update.message.text.strip()
+    await update.message.reply_text("Enter welcome message")
+    return CREATE_CLASS_WELCOME
+
+
+async def create_class_welcome(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
     school_name = context.user_data.get("school_name", "").strip()
-    class_name = update.message.text.strip()
+    class_name = context.user_data.get("class_name", "").strip()
+    teacher_name = context.user_data.get("teacher_name", "").strip()
+    welcome_message = update.message.text.strip()
     class_code = generate_class_code(school_name, class_name)
 
     create_class(
         class_code=class_code,
         school_name=school_name,
         class_name=class_name,
+        teacher_name=teacher_name,
+        welcome_message=welcome_message,
         teacher_telegram_id=update.effective_user.id,
     )
     context.user_data.pop("school_name", None)
+    context.user_data.pop("class_name", None)
+    context.user_data.pop("teacher_name", None)
 
     await update.message.reply_text(
         "✅ Class created!\n\n"
         f"School: {school_name}\n"
         f"Class: {class_name}\n"
+        f"Teacher: {teacher_name}\n"
         f"Class Code: {class_code}\n\n"
         "Students can join with:\n"
-        f"/join {class_code}"
+        f"/join {class_code}",
+        reply_markup=teacher_menu_keyboard(),
     )
     return ConversationHandler.END
 
@@ -222,13 +360,14 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(
-        f"✅ You joined {class_info['school_name']} - {class_info['class_name']}"
+        f"✅ You joined {class_info['school_name']} - {class_info['class_name']}",
+        reply_markup=student_menu_keyboard(),
     )
 
 
 async def my_class(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    teacher_classes = get_teacher_classes(update.effective_user.id)
-    if teacher_classes:
+    if is_teacher(update.effective_user.id):
+        teacher_classes = get_teacher_classes(update.effective_user.id)
         lines = ["🏫 Your Classes"]
         for class_info in teacher_classes:
             lines.append(
@@ -254,9 +393,12 @@ async def my_class(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def class_students(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_teacher(update):
+        return
+
     rows = get_students_for_teacher(update.effective_user.id)
     if not rows:
-        await update.message.reply_text("Teacher only: create a class first with /create_class")
+        await update.message.reply_text("No classes found. Create one with /create_class")
         return
 
     classes: dict[str, dict[str, object]] = {}
@@ -317,12 +459,14 @@ async def progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_level = get_user_level(update.effective_user.id)
+    class_info = get_user_class(update.effective_user.id)
+    class_code = class_info["class_code"] if class_info else None
 
     if user_level is None:
         await update.message.reply_text("Please choose your level first with /start")
         return
 
-    words = get_words_by_level(user_level, limit=5)
+    words = get_words_by_level(user_level, limit=5, class_code=class_code)
     if not words:
         await update.message.reply_text(
             "No words found for your level yet. Please try again later."
@@ -353,12 +497,14 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_level = get_user_level(update.effective_user.id)
+    class_info = get_user_class(update.effective_user.id)
+    class_code = class_info["class_code"] if class_info else None
 
     if user_level is None:
         await update.message.reply_text("Please choose your level first with /start")
         return
 
-    question = get_quiz_question(user_level)
+    question = get_quiz_question(user_level, class_code=class_code)
     if question is None:
         await update.message.reply_text(
             "No quiz words found for your level yet. Please try again later."
@@ -420,6 +566,67 @@ async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(
             chat_id=telegram_id,
             text="📚 Time for your daily vocabulary!\nUse /daily to learn today's words.",
+        )
+
+
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.message.text
+    teacher_only_buttons = {
+        STUDENTS_BUTTON,
+        MY_CLASSES_BUTTON,
+        TEACHER_TOOLS_BUTTON,
+        CLASS_REPORT_BUTTON,
+        SEND_REMINDER_BUTTON,
+    }
+
+    if text in teacher_only_buttons and not await require_teacher(update):
+        return
+
+    if text == DAILY_BUTTON:
+        await daily(update, context)
+    elif text == QUIZ_BUTTON:
+        await quiz(update, context)
+    elif text == PROGRESS_BUTTON:
+        await progress(update, context)
+    elif text in (MY_CLASS_BUTTON, MY_CLASSES_BUTTON):
+        await my_class(update, context)
+    elif text == STUDENTS_BUTTON:
+        await class_students(update, context)
+    elif text == SETTINGS_BUTTON:
+        await update.message.reply_text(
+            "⚙️ Settings\n\nChoose what you want to update.",
+            reply_markup=student_settings_keyboard(),
+        )
+    elif text == CHANGE_LEVEL_BUTTON:
+        await level(update, context)
+    elif text == REMINDER_BUTTON:
+        await update.message.reply_text(
+            "⏰ Reminder\n\nTurn your daily vocabulary reminder on or off.",
+            reply_markup=reminder_keyboard(),
+        )
+    elif text == REMINDER_ON_BUTTON:
+        await reminder_on(update, context)
+    elif text == REMINDER_OFF_BUTTON:
+        await reminder_off(update, context)
+    elif text == TEACHER_TOOLS_BUTTON:
+        if not await require_teacher(update):
+            return
+        await update.message.reply_text(
+            "⚙️ Teacher Tools\n\nChoose a class action.",
+            reply_markup=teacher_tools_keyboard(),
+        )
+    elif text == CLASS_REPORT_BUTTON:
+        if not await require_teacher(update):
+            return
+        await update.message.reply_text("📊 Class reports are coming soon.")
+    elif text == SEND_REMINDER_BUTTON:
+        if not await require_teacher(update):
+            return
+        await update.message.reply_text("📢 Class reminder sending is coming soon.")
+    elif text == BACK_BUTTON:
+        await update.message.reply_text(
+            "Main menu",
+            reply_markup=user_menu_keyboard(update.effective_user.id),
         )
 
 
@@ -489,13 +696,25 @@ def main() -> None:
         .build()
     )
     create_class_conversation = ConversationHandler(
-        entry_points=[CommandHandler("create_class", create_class_start)],
+        entry_points=[
+            CommandHandler("create_class", create_class_start),
+            MessageHandler(
+                filters.Regex(f"^{re.escape(CREATE_CLASS_BUTTON)}$"),
+                create_class_start,
+            ),
+        ],
         states={
             CREATE_CLASS_SCHOOL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_class_school)
             ],
             CREATE_CLASS_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_class_name)
+            ],
+            CREATE_CLASS_TEACHER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, create_class_teacher)
+            ],
+            CREATE_CLASS_WELCOME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, create_class_welcome)
             ],
         },
         fallbacks=[],
@@ -515,6 +734,7 @@ def main() -> None:
     application.add_handler(CommandHandler("reminder_off", reminder_off))
     application.add_handler(CallbackQueryHandler(handle_level_choice, pattern=r"^level:"))
     application.add_handler(CallbackQueryHandler(handle_quiz_answer, pattern=r"^quiz:"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_button))
 
     if application.job_queue is None:
         raise RuntimeError(

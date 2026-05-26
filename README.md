@@ -5,7 +5,7 @@ A simple Telegram vocabulary trainer bot MVP built with Python, python-telegram-
 ## Features
 
 - `/start` command with a welcome message
-- Telegram bot menu commands
+- Clean role-based Telegram keyboards for students and teachers
 - Inline level buttons: A1, A2, B1, B2
 - Saves each user's Telegram ID and selected level in SQLite
 - `/level` command to change level
@@ -67,3 +67,8 @@ The bot will create `vocab_trainer.db` automatically on startup and import the s
 - `/join CLASSCODE` - Join a class with your teacher's code
 - `/my_class` - View your class details
 - `/class_students` - View students who joined your class
+
+The visible Telegram command menu only exposes `/start` and `/help`.
+Students and teachers use the on-screen keyboard for the main workflow.
+Teacher-only tools require `role = teacher`; students who try teacher actions receive an access-required message.
+Private school mode keeps `/create_class` teacher-only. Classes can store school name, class name, teacher name, and a custom welcome message. Class-specific vocabulary can be stored in `words.class_code`; the bot falls back to shared level vocabulary when a class has no custom words yet.

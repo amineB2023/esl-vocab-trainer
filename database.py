@@ -43,14 +43,16 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS words (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                class_code TEXT,
                 level TEXT NOT NULL,
                 word TEXT NOT NULL,
                 definition TEXT NOT NULL,
                 example TEXT NOT NULL,
-                UNIQUE(level, word)
+                UNIQUE(class_code, level, word)
             )
             """
         )
+        add_word_class_columns(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS classes (
@@ -58,11 +60,14 @@ def init_db() -> None:
                 class_code TEXT UNIQUE,
                 school_name TEXT,
                 class_name TEXT,
+                welcome_message TEXT,
+                teacher_name TEXT,
                 teacher_telegram_id INTEGER,
                 created_at TEXT
             )
             """
         )
+        add_class_personalization_columns(connection)
 
 
 def add_user_progress_columns(connection: sqlite3.Connection) -> None:
@@ -115,6 +120,24 @@ def add_user_class_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE users ADD COLUMN username TEXT")
 
 
+def add_word_class_columns(connection: sqlite3.Connection) -> None:
+    cursor = connection.execute("PRAGMA table_info(words)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+
+    if "class_code" not in existing_columns:
+        connection.execute("ALTER TABLE words ADD COLUMN class_code TEXT")
+
+
+def add_class_personalization_columns(connection: sqlite3.Connection) -> None:
+    cursor = connection.execute("PRAGMA table_info(classes)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+
+    if "welcome_message" not in existing_columns:
+        connection.execute("ALTER TABLE classes ADD COLUMN welcome_message TEXT")
+    if "teacher_name" not in existing_columns:
+        connection.execute("ALTER TABLE classes ADD COLUMN teacher_name TEXT")
+
+
 def save_user_level(telegram_id: int, level: str) -> None:
     with get_connection() as connection:
         connection.execute(
@@ -160,6 +183,17 @@ def get_user_level(telegram_id: int) -> str | None:
         return None
 
     return row[0]
+
+
+def is_teacher(telegram_id: int) -> bool:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT role FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = cursor.fetchone()
+
+    return row is not None and row[0] == "teacher"
 
 
 def get_user_progress(telegram_id: int) -> dict[str, int]:
@@ -288,6 +322,8 @@ def create_class(
     class_code: str,
     school_name: str,
     class_name: str,
+    teacher_name: str,
+    welcome_message: str,
     teacher_telegram_id: int,
 ) -> None:
     with get_connection() as connection:
@@ -297,12 +333,21 @@ def create_class(
                 class_code,
                 school_name,
                 class_name,
+                welcome_message,
+                teacher_name,
                 teacher_telegram_id,
                 created_at
             )
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
-            (class_code, school_name, class_name, teacher_telegram_id),
+            (
+                class_code,
+                school_name,
+                class_name,
+                welcome_message,
+                teacher_name,
+                teacher_telegram_id,
+            ),
         )
         connection.execute(
             """
@@ -321,7 +366,13 @@ def get_class_by_code(class_code: str) -> dict[str, object] | None:
         connection.row_factory = sqlite3.Row
         cursor = connection.execute(
             """
-            SELECT class_code, school_name, class_name, teacher_telegram_id
+            SELECT
+                class_code,
+                school_name,
+                class_name,
+                welcome_message,
+                teacher_name,
+                teacher_telegram_id
             FROM classes
             WHERE class_code = ?
             """,
@@ -375,7 +426,13 @@ def get_user_class(telegram_id: int) -> dict[str, object] | None:
         connection.row_factory = sqlite3.Row
         cursor = connection.execute(
             """
-            SELECT users.role, classes.school_name, classes.class_name, classes.class_code
+            SELECT
+                users.role,
+                classes.school_name,
+                classes.class_name,
+                classes.class_code,
+                classes.welcome_message,
+                classes.teacher_name
             FROM users
             JOIN classes ON users.class_code = classes.class_code
             WHERE users.telegram_id = ?
@@ -395,7 +452,7 @@ def get_teacher_classes(teacher_telegram_id: int) -> list[dict[str, object]]:
         connection.row_factory = sqlite3.Row
         cursor = connection.execute(
             """
-            SELECT class_code, school_name, class_name
+            SELECT class_code, school_name, class_name, welcome_message, teacher_name
             FROM classes
             WHERE teacher_telegram_id = ?
             ORDER BY created_at DESC
@@ -442,6 +499,7 @@ def import_words_from_csv_files(data_dir: Path = DATA_DIR) -> None:
         has_old_option_columns = {"option_a", "option_b", "option_c", "correct_option"}.issubset(
             word_columns
         )
+        has_class_code = "class_code" in word_columns
 
         for csv_file in csv_files:
             with csv_file.open("r", encoding="utf-8", newline="") as file:
@@ -474,39 +532,82 @@ def import_words_from_csv_files(data_dir: Path = DATA_DIR) -> None:
                             ),
                         )
                     else:
-                        connection.execute(
-                            """
-                            INSERT OR IGNORE INTO words (
-                                level,
-                                word,
-                                definition,
-                                example
+                        if has_class_code:
+                            connection.execute(
+                                """
+                                INSERT OR IGNORE INTO words (
+                                    class_code,
+                                    level,
+                                    word,
+                                    definition,
+                                    example
+                                )
+                                VALUES (?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    row.get("class_code"),
+                                    row["level"],
+                                    row["word"],
+                                    row["definition"],
+                                    row["example"],
+                                ),
                             )
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (
-                                row["level"],
-                                row["word"],
-                                row["definition"],
-                                row["example"],
-                            ),
-                        )
+                        else:
+                            connection.execute(
+                                """
+                                INSERT OR IGNORE INTO words (
+                                    level,
+                                    word,
+                                    definition,
+                                    example
+                                )
+                                VALUES (?, ?, ?, ?)
+                                """,
+                                (
+                                    row["level"],
+                                    row["word"],
+                                    row["definition"],
+                                    row["example"],
+                                ),
+                            )
 
 
-def get_words_by_level(level: str, limit: int = 5) -> list[dict[str, str]]:
+def get_words_by_level(
+    level: str,
+    limit: int = 5,
+    class_code: str | None = None,
+) -> list[dict[str, str]]:
     with get_connection() as connection:
         connection.row_factory = sqlite3.Row
-        cursor = connection.execute(
-            """
-            SELECT word, definition, example
-            FROM words
-            WHERE level = ?
-            ORDER BY RANDOM()
-            LIMIT ?
-            """,
-            (level, limit),
-        )
-        rows = cursor.fetchall()
+        rows = []
+
+        if class_code:
+            cursor = connection.execute(
+                """
+                SELECT word, definition, example
+                FROM words
+                WHERE level = ?
+                  AND class_code = ?
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (level, class_code, limit),
+            )
+            rows = cursor.fetchall()
+
+        if not rows:
+            cursor = connection.execute(
+                """
+                SELECT word, definition, example
+                FROM words
+                WHERE level = ?
+                  AND (class_code IS NULL OR class_code = '')
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (level, limit),
+            )
+            rows = cursor.fetchall()
 
     return [dict(row) for row in rows]
 
@@ -530,35 +631,69 @@ def get_word_by_id(word_id: int) -> dict[str, str] | None:
     return dict(row)
 
 
-def get_quiz_question(level: str) -> dict[str, object] | None:
+def get_quiz_question(
+    level: str,
+    class_code: str | None = None,
+) -> dict[str, object] | None:
     with get_connection() as connection:
         connection.row_factory = sqlite3.Row
+        class_filter = "AND class_code = ?" if class_code else "AND (class_code IS NULL OR class_code = '')"
+        params: tuple[object, ...] = (level, class_code) if class_code else (level,)
         cursor = connection.execute(
-            """
+            f"""
             SELECT id, word, definition
             FROM words
             WHERE level = ?
+              {class_filter}
             ORDER BY RANDOM()
             LIMIT 1
             """,
-            (level,),
+            params,
         )
         correct_word = cursor.fetchone()
 
+        if correct_word is None and class_code:
+            return get_quiz_question(level)
         if correct_word is None:
             return None
 
+        other_params: tuple[object, ...]
+        if class_code:
+            other_filter = "AND class_code = ?"
+            other_params = (level, correct_word["id"], class_code)
+        else:
+            other_filter = "AND (class_code IS NULL OR class_code = '')"
+            other_params = (level, correct_word["id"])
         cursor = connection.execute(
-            """
+            f"""
             SELECT word
             FROM words
             WHERE level = ? AND id != ?
+              {other_filter}
             ORDER BY RANDOM()
             LIMIT 2
             """,
-            (level, correct_word["id"]),
+            other_params,
         )
         other_words = cursor.fetchall()
+
+        if len(other_words) < 2:
+            existing_options = {correct_word["word"]}
+            existing_options.update(row["word"] for row in other_words)
+            placeholders = ", ".join("?" for _ in existing_options)
+            cursor = connection.execute(
+                f"""
+                SELECT word
+                FROM words
+                WHERE level = ?
+                  AND (class_code IS NULL OR class_code = '')
+                  AND word NOT IN ({placeholders})
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (level, *existing_options, 2 - len(other_words)),
+            )
+            other_words.extend(cursor.fetchall())
 
     options = [correct_word["word"]] + [row["word"] for row in other_words]
     random.shuffle(options)
