@@ -31,13 +31,14 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
-                level TEXT NOT NULL,
+                level TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         add_user_progress_columns(connection)
+        add_user_class_columns(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS words (
@@ -47,6 +48,18 @@ def init_db() -> None:
                 definition TEXT NOT NULL,
                 example TEXT NOT NULL,
                 UNIQUE(level, word)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS classes (
+                id INTEGER PRIMARY KEY,
+                class_code TEXT UNIQUE,
+                school_name TEXT,
+                class_name TEXT,
+                teacher_telegram_id INTEGER,
+                created_at TEXT
             )
             """
         )
@@ -86,6 +99,22 @@ def add_user_progress_columns(connection: sqlite3.Connection) -> None:
         )
 
 
+def add_user_class_columns(connection: sqlite3.Connection) -> None:
+    cursor = connection.execute("PRAGMA table_info(users)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+
+    if "class_code" not in existing_columns:
+        connection.execute("ALTER TABLE users ADD COLUMN class_code TEXT")
+    if "role" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'student'"
+        )
+    if "first_name" not in existing_columns:
+        connection.execute("ALTER TABLE users ADD COLUMN first_name TEXT")
+    if "username" not in existing_columns:
+        connection.execute("ALTER TABLE users ADD COLUMN username TEXT")
+
+
 def save_user_level(telegram_id: int, level: str) -> None:
     with get_connection() as connection:
         connection.execute(
@@ -97,6 +126,25 @@ def save_user_level(telegram_id: int, level: str) -> None:
                 updated_at = CURRENT_TIMESTAMP
             """,
             (telegram_id, level),
+        )
+
+
+def save_user_profile(
+    telegram_id: int,
+    first_name: str | None = None,
+    username: str | None = None,
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO users (telegram_id, level, first_name, username)
+            VALUES (?, 'A1', ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                first_name = excluded.first_name,
+                username = excluded.username,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (telegram_id, first_name, username),
         )
 
 
@@ -223,6 +271,166 @@ def get_users_due_for_reminder(current_hour: int | None = None) -> list[int]:
         rows = cursor.fetchall()
 
     return [row[0] for row in rows]
+
+
+def class_code_exists(class_code: str) -> bool:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT 1 FROM classes WHERE class_code = ?",
+            (class_code,),
+        )
+        row = cursor.fetchone()
+
+    return row is not None
+
+
+def create_class(
+    class_code: str,
+    school_name: str,
+    class_name: str,
+    teacher_telegram_id: int,
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO classes (
+                class_code,
+                school_name,
+                class_name,
+                teacher_telegram_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (class_code, school_name, class_name, teacher_telegram_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO users (telegram_id, level, role)
+            VALUES (?, 'A1', 'teacher')
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                role = 'teacher',
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (teacher_telegram_id,),
+        )
+
+
+def get_class_by_code(class_code: str) -> dict[str, object] | None:
+    with get_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        cursor = connection.execute(
+            """
+            SELECT class_code, school_name, class_name, teacher_telegram_id
+            FROM classes
+            WHERE class_code = ?
+            """,
+            (class_code,),
+        )
+        row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def join_class(
+    telegram_id: int,
+    class_code: str,
+    first_name: str | None = None,
+    username: str | None = None,
+) -> dict[str, object] | None:
+    class_info = get_class_by_code(class_code)
+    if class_info is None:
+        return None
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO users (
+                telegram_id,
+                level,
+                class_code,
+                role,
+                first_name,
+                username
+            )
+            VALUES (?, 'A1', ?, 'student', ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                class_code = excluded.class_code,
+                role = 'student',
+                first_name = excluded.first_name,
+                username = excluded.username,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (telegram_id, class_code, first_name, username),
+        )
+
+    return class_info
+
+
+def get_user_class(telegram_id: int) -> dict[str, object] | None:
+    with get_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        cursor = connection.execute(
+            """
+            SELECT users.role, classes.school_name, classes.class_name, classes.class_code
+            FROM users
+            JOIN classes ON users.class_code = classes.class_code
+            WHERE users.telegram_id = ?
+            """,
+            (telegram_id,),
+        )
+        row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def get_teacher_classes(teacher_telegram_id: int) -> list[dict[str, object]]:
+    with get_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        cursor = connection.execute(
+            """
+            SELECT class_code, school_name, class_name
+            FROM classes
+            WHERE teacher_telegram_id = ?
+            ORDER BY created_at DESC
+            """,
+            (teacher_telegram_id,),
+        )
+        rows = cursor.fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_students_for_teacher(teacher_telegram_id: int) -> list[dict[str, object]]:
+    with get_connection() as connection:
+        connection.row_factory = sqlite3.Row
+        cursor = connection.execute(
+            """
+            SELECT
+                classes.class_code,
+                classes.school_name,
+                classes.class_name,
+                users.telegram_id,
+                users.first_name,
+                users.username
+            FROM classes
+            LEFT JOIN users
+                ON users.class_code = classes.class_code
+               AND users.role = 'student'
+            WHERE classes.teacher_telegram_id = ?
+            ORDER BY classes.class_name, users.first_name, users.username
+            """,
+            (teacher_telegram_id,),
+        )
+        rows = cursor.fetchall()
+
+    return [dict(row) for row in rows]
 
 
 def import_words_from_csv_files(data_dir: Path = DATA_DIR) -> None:

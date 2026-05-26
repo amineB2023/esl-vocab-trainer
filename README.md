@@ -14,6 +14,9 @@ A simple Telegram vocabulary trainer bot MVP built with Python, python-telegram-
 - `/progress` command with XP, streak, answers, and accuracy
 - `/reminder_on` and `/reminder_off` commands for daily vocabulary reminders
 - `/help` command with usage guidance
+- Teacher class codes with `/create_class`
+- Student class joining with `/join CLASSCODE`
+- Class lookup with `/my_class` and `/class_students`
 
 ## Setup
 
@@ -60,3 +63,7 @@ The bot will create `vocab_trainer.db` automatically on startup and import the s
 - `/progress` - Show placeholder progress
 - `/reminder_on` - Enable the daily 8:00 AM vocabulary reminder
 - `/reminder_off` - Disable the daily vocabulary reminder
+- `/create_class` - Create a Telegram class code
+- `/join CLASSCODE` - Join a class with your teacher's code
+- `/my_class` - View your class details
+- `/class_students` - View students who joined your class

@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import re
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -9,10 +10,18 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
 from database import (
+    class_code_exists,
+    create_class,
     get_quiz_question,
+    get_students_for_teacher,
+    get_teacher_classes,
+    get_user_class,
     get_user_level,
     get_user_progress,
     get_users_due_for_reminder,
@@ -20,6 +29,7 @@ from database import (
     get_word_by_id,
     import_words_from_csv_files,
     init_db,
+    join_class,
     save_user_level,
     set_reminder,
     update_daily_activity,
@@ -28,6 +38,7 @@ from database import (
 
 
 LEVELS = ("A1", "A2", "B1", "B2")
+CREATE_CLASS_SCHOOL, CREATE_CLASS_NAME = range(2)
 WORD_EMOJIS = {
     "apple": "🍎",
     "book": "📖",
@@ -61,6 +72,10 @@ BOT_COMMANDS = [
     BotCommand("level", "Change level"),
     BotCommand("reminder_on", "Turn on daily reminder"),
     BotCommand("reminder_off", "Turn off daily reminder"),
+    BotCommand("create_class", "Create a class code"),
+    BotCommand("join", "Join a class"),
+    BotCommand("my_class", "View your class"),
+    BotCommand("class_students", "View class students"),
     BotCommand("help", "How to use the bot"),
 ]
 
@@ -93,9 +108,37 @@ def word_emoji(word: str) -> str:
     return random.choice(DEFAULT_WORD_EMOJIS)
 
 
+def class_code_part(text: str, fallback: str) -> str:
+    match = re.search(r"[A-Za-z0-9]+", text.upper())
+    if match is None:
+        return fallback
+
+    return match.group(0)[:10]
+
+
+def generate_class_code(school_name: str, class_name: str) -> str:
+    school_part = class_code_part(school_name, "CLASS")
+    class_part = class_code_part(class_name, "")
+
+    for _ in range(20):
+        number = random.randint(100, 999)
+        if class_part:
+            class_code = f"{school_part}-{class_part}-{number}"
+        else:
+            class_code = f"{school_part}-{number}"
+
+        if not class_code_exists(class_code):
+            return class_code
+
+    return f"CLASS-{random.randint(1000, 9999)}"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Welcome to ESL Vocabulary Trainer!\n\nChoose your English level:",
+        "Welcome to ESL Vocabulary Trainer!\n\n"
+        "Choose your English level:\n\n"
+        "If you have a class code from your teacher, send:\n"
+        "/join YOUR-CODE",
         reply_markup=level_keyboard(),
     )
 
@@ -108,9 +151,146 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🧠 Quiz - Test yourself\n"
         "📊 Progress - View XP, streak, and accuracy\n"
         "🎚 Level - Change A1/A2/B1/B2\n"
-        "🔔 Reminder - Turn daily reminders on/off",
+        "🔔 Reminder - Turn daily reminders on/off\n"
+        "🏫 Classes - Create or join a class with Telegram",
         parse_mode="Markdown",
     )
+
+
+async def create_class_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    await update.message.reply_text("Enter school name")
+    return CREATE_CLASS_SCHOOL
+
+
+async def create_class_school(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    context.user_data["school_name"] = update.message.text.strip()
+    await update.message.reply_text("Enter class name")
+    return CREATE_CLASS_NAME
+
+
+async def create_class_name(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    school_name = context.user_data.get("school_name", "").strip()
+    class_name = update.message.text.strip()
+    class_code = generate_class_code(school_name, class_name)
+
+    create_class(
+        class_code=class_code,
+        school_name=school_name,
+        class_name=class_name,
+        teacher_telegram_id=update.effective_user.id,
+    )
+    context.user_data.pop("school_name", None)
+
+    await update.message.reply_text(
+        "✅ Class created!\n\n"
+        f"School: {school_name}\n"
+        f"Class: {class_name}\n"
+        f"Class Code: {class_code}\n\n"
+        "Students can join with:\n"
+        f"/join {class_code}"
+    )
+    return ConversationHandler.END
+
+
+async def join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Please send a class code like:\n/join CLASS-9284")
+        return
+
+    class_code = context.args[0].strip().upper()
+    user = update.effective_user
+    class_info = join_class(
+        telegram_id=user.id,
+        class_code=class_code,
+        first_name=user.first_name,
+        username=user.username,
+    )
+
+    if class_info is None:
+        await update.message.reply_text(
+            "❌ Class code not found. Please check with your teacher."
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ You joined {class_info['school_name']} - {class_info['class_name']}"
+    )
+
+
+async def my_class(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    teacher_classes = get_teacher_classes(update.effective_user.id)
+    if teacher_classes:
+        lines = ["🏫 Your Classes"]
+        for class_info in teacher_classes:
+            lines.append(
+                f"\nSchool: {class_info['school_name']}\n"
+                f"Class: {class_info['class_name']}\n"
+                f"Code: {class_info['class_code']}"
+            )
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    class_info = get_user_class(update.effective_user.id)
+    if class_info is None:
+        await update.message.reply_text("You have not joined a class yet.")
+        return
+
+    await update.message.reply_text(
+        "🏫 School:\n"
+        f"{class_info['school_name']}\n\n"
+        "👥 Class:\n"
+        f"{class_info['class_name']}\n\n"
+        "🎓 Role: Student"
+    )
+
+
+async def class_students(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rows = get_students_for_teacher(update.effective_user.id)
+    if not rows:
+        await update.message.reply_text("Teacher only: create a class first with /create_class")
+        return
+
+    classes: dict[str, dict[str, object]] = {}
+    for row in rows:
+        class_code = str(row["class_code"])
+        if class_code not in classes:
+            classes[class_code] = {
+                "title": f"{row['school_name']} - {row['class_name']}",
+                "students": [],
+            }
+
+        if row["telegram_id"] is None:
+            continue
+
+        if row["username"]:
+            student_name = f"@{row['username']}"
+        elif row["first_name"]:
+            student_name = row["first_name"]
+        else:
+            student_name = str(row["telegram_id"])
+
+        classes[class_code]["students"].append(student_name)
+
+    messages = ["👥 Class Students"]
+    for class_code, class_data in classes.items():
+        messages.append(f"\n{class_data['title']}\nCode: {class_code}")
+        students = class_data["students"]
+        if students:
+            for index, student in enumerate(students, start=1):
+                messages.append(f"{index}. {student}")
+        else:
+            messages.append("No students yet.")
+
+    await update.message.reply_text("\n".join(messages))
 
 
 async def level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -308,12 +488,29 @@ def main() -> None:
         .post_init(register_bot_commands)
         .build()
     )
+    create_class_conversation = ConversationHandler(
+        entry_points=[CommandHandler("create_class", create_class_start)],
+        states={
+            CREATE_CLASS_SCHOOL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, create_class_school)
+            ],
+            CREATE_CLASS_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, create_class_name)
+            ],
+        },
+        fallbacks=[],
+    )
+
+    application.add_handler(create_class_conversation)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("level", level))
     application.add_handler(CommandHandler("progress", progress))
     application.add_handler(CommandHandler("daily", daily))
     application.add_handler(CommandHandler("quiz", quiz))
+    application.add_handler(CommandHandler("join", join))
+    application.add_handler(CommandHandler("my_class", my_class))
+    application.add_handler(CommandHandler("class_students", class_students))
     application.add_handler(CommandHandler("reminder_on", reminder_on))
     application.add_handler(CommandHandler("reminder_off", reminder_off))
     application.add_handler(CallbackQueryHandler(handle_level_choice, pattern=r"^level:"))
